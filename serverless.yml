@@ -1,0 +1,128 @@
+service: appointment-backend
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: ${env:AWS_REGION}
+  environment:
+    DYNAMODB_TABLE_NAME: ${env:DYNAMODB_TABLE_NAME}
+    SNS_TOPIC_PE: ${env:SNS_TOPIC_PE}
+    SNS_TOPIC_CL: ${env:SNS_TOPIC_CL}
+    RDS_HOST: ${env:RDS_HOST}
+    RDS_USER: ${env:RDS_USER}
+    RDS_PASSWORD: ${env:RDS_PASSWORD}
+    RDS_DB_NAME: ${env:RDS_DB_NAME}
+    EVENT_BUS_NAME: AppointmentEventBus
+    EVENT_SOURCE: appointment.backend
+    EVENT_DETAIL_TYPE: AppointmentConfirmed
+
+functions:
+  scheduleAppointment:
+    handler: src/handlers/appointment.postAppointment
+    events:
+      - http:
+          path: schedule
+          method: post
+
+  processAppointmentPE:
+    handler: src/handlers/appointmentPE.processAppointmentPE
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - SQSPETopic
+              - Arn
+
+  processAppointmentCL:
+    handler: src/handlers/appointmentCL.processAppointmentCL
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - SQSCLTopic
+              - Arn
+
+  updateStatus:
+    handler: src/handlers/updateStatus.updateStatus
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - SQSUpdateStatusTopic
+              - Arn
+
+  handleAppointmentConfirmation:
+    handler: src/handlers/handleAppointmentConfirmation.handleConfirmation
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - SQSUpdate
+              - Arn
+
+resources:
+  Resources:
+    SQSPETopic:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: appointmentPEQueue
+
+    SQSCLTopic:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: appointmentCLQueue
+
+    SQSUpdateStatusTopic:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: appointmentUpdateStatusQueue
+
+    AppointmentEventBus:
+      Type: AWS::Events::EventBus
+      Properties:
+        Name: ${self:provider.environment.EVENT_BUS_NAME}
+
+    SQSUpdate:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: appointmentUpdateStatusQueue
+
+    AppointmentConfirmedRule:
+      Type: AWS::Events::Rule
+      Properties:
+        Name: AppointmentConfirmedRule
+        EventBusName: ${self:provider.environment.EVENT_BUS_NAME}
+        EventPattern:
+          source:
+            - ${self:provider.environment.EVENT_SOURCE}
+          detail-type:
+            - ${self:provider.environment.EVENT_DETAIL_TYPE}
+        Targets:
+          - Arn:
+              Fn::GetAtt:
+                - SQSUpdate
+                - Arn
+            Id: "SQSUpdate"
+
+    SQSUpdatePolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - Ref: SQSUpdate
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Principal:
+                Service: "events.amazonaws.com"
+              Action: "sqs:SendMessage"
+              Resource:
+                Fn::GetAtt:
+                  - SQSUpdate
+                  - Arn
+              Condition:
+                ArnEquals:
+                  aws:SourceArn:
+                    Fn::GetAtt:
+                      - AppointmentConfirmedRule
+                      - Arn
